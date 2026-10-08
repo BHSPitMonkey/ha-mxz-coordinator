@@ -131,6 +131,16 @@ elapsed    draw       what's happening
   stops driving that fan — no snapping back to auto, no timeout. Each room has a
   **Fan auto** switch that shows who is driving and hands control back with one tap,
   including from Apple Home. Details: [Who drives the fan](#who-drives-the-fan).
+- **Optional: accept changes made at the head.** Off by default, so the coordinator stays
+  the sole writer. Turn on **Accept changes made at the head** (Configure) and a setpoint
+  or *off* set at a head (wall remote, the head's own app) is adopted instead of
+  overwritten, once it has held for a few seconds. The room's target follows the head's
+  setpoint (the high edge in cool, the low edge in heat, or the single setpoint). Turning
+  a head off disables the room, and turning one on to heat or cool enables it. The head's
+  heat/cool choice is never adopted: the coordinator still picks the shared mode, so the
+  head is put back on the plan's mode with the new target. Nothing is adopted during eco or
+  a standby hold, with the kill-switch off, or from a head that was merely parked by the
+  plan. `heat_cool`, `auto` and `dry` are still reverted.
 - **Per-room enable switches.** Turn one room off without touching the others.
 - **Pick the shared mode yourself.** **Shared mode** offers `cool` and `heat` — the two
   directions one outdoor unit can share. Choosing the other direction is a request for

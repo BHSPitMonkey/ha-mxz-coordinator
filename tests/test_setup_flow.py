@@ -79,6 +79,7 @@ _TUNING_KEYS = frozenset(
         "changeover_cool_below",
         "fan_boost_enable",
         "fan_boost_max",
+        "accept_head_changes",
         "inhibit_active_state",
         "inhibit_action",
         "idle_action",
@@ -351,7 +352,7 @@ async def test_s07_s08_skipping_advanced_equals_submitting_it_untouched(
     assert set(skipped) == _TUNING_KEYS
     # changeover_entity / inhibit_entity are optional with no default, so a
     # default submit has never stored them. Eighteen keys, not twenty.
-    assert len(skipped) == 18
+    assert len(skipped) == 19
     assert "changeover_entity" not in skipped
     assert "inhibit_entity" not in skipped
     assert skipped[CONF_DEMAND_THRESHOLD] == pytest.approx(
@@ -816,7 +817,7 @@ async def test_s23_summary_is_complete_and_nothing_is_written_until_confirmed(
         "Priority 2  Bedroom",
         f"  Head:   {BEDROOM}",
         BEDROOM_SENSOR,
-        "Comfort settings: defaults for °F (18 values). Idle: fan_only.",
+        "Comfort settings: defaults for °F (19 values). Idle: fan_only.",
     ):
         assert expected in summary, (expected, summary)
     assert hass.config_entries.async_entries(DOMAIN) == []

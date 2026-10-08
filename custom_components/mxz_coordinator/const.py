@@ -252,6 +252,17 @@ DEFAULT_IDLE_ACTION = IDLE_ACTION_FAN_ONLY
 CONF_COIL_DRY_MINUTES = "coil_dry_minutes"
 DEFAULT_COIL_DRY_MINUTES = 10
 
+# --- Accept head changes (opt-in) -------------------------------------------
+# By default the coordinator is the sole writer: a setpoint or on/off change made
+# at a head (wall remote, the head's own app) is overwritten at the next apply.
+# With this on, such a change is ADOPTED instead: the room's single target (and
+# enable switch) take the head's value, and the coordinator then re-derives the
+# head from them. The head's heat/cool choice is deliberately NOT adopted - the
+# shared mode stays the plan's decision.
+CONF_ACCEPT_HEAD_CHANGES = "accept_head_changes"
+DEFAULT_ACCEPT_HEAD_CHANGES = False
+ADOPT_DELAY = 5  # head change must hold this long (s) before it is adopted
+
 # Target setpoint number bounds (input_number hvac_*_target in the YAML)
 TARGET_MIN = 55
 TARGET_MAX = 85

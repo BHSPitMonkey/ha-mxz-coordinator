@@ -42,9 +42,11 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .const import (
+    ADOPT_DELAY,
     BAND_DRIFT_DELAY,
     BANNED_MODES,
     CHANGEOVER_INTERVAL_MINUTES,
+    CONF_ACCEPT_HEAD_CHANGES,
     CONF_CHANGEOVER_COOL_BELOW,
     CONF_CHANGEOVER_ENTITY,
     CONF_CHANGEOVER_HEAT_ABOVE,
@@ -77,6 +79,7 @@ from .const import (
     CONF_SECONDARY_VANE_HORIZONTAL,
     CONF_SECONDARY_VANE_VERTICAL,
     CONF_ZONES,
+    DEFAULT_ACCEPT_HEAD_CHANGES,
     DEFAULT_COIL_DRY_MINUTES,
     DEFAULT_FAN_BOOST_ENABLE,
     DEFAULT_FAN_BOOST_MAX,
@@ -438,6 +441,11 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # off, or off after a coil-dry fan run following active cooling. Airflow
         # only — the refrigerant valve position is the same either way.
         self.idle_action: str = conf.get(CONF_IDLE_ACTION, DEFAULT_IDLE_ACTION)
+        # Opt-in: adopt a setpoint / on-off change made at a head into the
+        # room's target + enable instead of overwriting it (see const).
+        self.accept_head_changes: bool = bool(
+            conf.get(CONF_ACCEPT_HEAD_CHANGES, DEFAULT_ACCEPT_HEAD_CHANGES)
+        )
         self.coil_dry_seconds: float = 60.0 * float(
             conf.get(CONF_COIL_DRY_MINUTES, DEFAULT_COIL_DRY_MINUTES)
         )
@@ -1392,6 +1400,8 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for zone, engage in zip(self.zones, engages):
             if zone.climate_id in self._vane_kicks:
                 continue  # mid vane-kick: leave the head alone until it finishes
+            if (zone.climate_id, "adopt") in self._heal_timers:
+                continue  # a head-side change is settling: adopt it, don't undo it
             act = head_action(
                 engage=engage,
                 mode=state,
@@ -2385,7 +2395,18 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and not self.inhibited
             and self._planned_act_for(entity_id) != MODE_OFF
         )
-        self._arm_or_cancel(entity_id, "off", off_drift, OFF_WHILE_ENABLED_DELAY)
+        if self.accept_head_changes:
+            # Adopted (below) instead of healed: the room follows the head.
+            self._arm_or_cancel(entity_id, "off", False, OFF_WHILE_ENABLED_DELAY)
+            if self._head_change_relevant(old_state, new_state):
+                self._arm_or_cancel(
+                    entity_id,
+                    "adopt",
+                    self._head_adoption(entity_id) is not None,
+                    ADOPT_DELAY,
+                )
+        else:
+            self._arm_or_cancel(entity_id, "off", off_drift, OFF_WHILE_ENABLED_DELAY)
 
         # A fan_mode change is a latch-relevant observation (a manual pick, an
         # `auto` handback, or our own write's echo): refresh promptly so the
@@ -2415,6 +2436,9 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """A drift condition persisted past its debounce window."""
         self._heal_timers.pop(key, None)
         entity_id, kind = key
+        if kind == "adopt":
+            self.hass.async_create_task(self._async_adopt_head_change(entity_id))
+            return
         state = self.hass.states.get(entity_id)
         mode = state.state if state else None
         if kind == "band":
@@ -2428,6 +2452,121 @@ class MXZCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         if still and self.coordinator_enable and not self.inhibited:
             self.hass.async_create_task(self._heal_and_notify())
+
+    # -- accept head changes (opt-in) ----------------------------------------
+    @staticmethod
+    def _head_change_relevant(old_state: Any, new_state: Any) -> bool:
+        """Did the mode or a setpoint move? (A fan/vane/echo-only event did not.)
+
+        Transitions from/to unavailable are a head (re)loading, never a person.
+        """
+        if old_state is None or new_state is None:
+            return False
+        if (
+            old_state.state in UNAVAILABLE_STATES
+            or new_state.state in UNAVAILABLE_STATES
+        ):
+            return False
+        if old_state.state != new_state.state:
+            return True
+        return any(
+            old_state.attributes.get(attr) != new_state.attributes.get(attr)
+            for attr in ("temperature", "target_temp_low", "target_temp_high")
+        )
+
+    def _head_adoption(self, climate_id: str) -> dict[str, Any] | None:
+        """What the room should take from its head right now, or None.
+
+        Stateless: the head is compared with what the coordinator would send it
+        in the head's OWN heat/cool mode, so our own write's echo (and a value
+        the head clamped) matches and is never mistaken for a person. Keys:
+        ``enable`` (bool) and ``target`` (float). Only the setpoint edge that
+        carries the room's target is read (high edge in cool, low in heat).
+        """
+        if (
+            not self.accept_head_changes
+            or self._retired
+            or not self.coordinator_enable
+            or self.inhibited
+            or self._eco_active()
+            or climate_id in self._vane_kicks
+        ):
+            return None
+        zone = next((z for z in self.zones if z.climate_id == climate_id), None)
+        state = self.hass.states.get(climate_id)
+        if zone is None or state is None or state.state in UNAVAILABLE_STATES:
+            return None
+        mode = state.state
+        if mode == MODE_OFF:
+            # A wall-remote off. An off the plan itself parked is not a request.
+            if zone.enable and self._planned_act_for(climate_id) != MODE_OFF:
+                return {"enable": False}
+            return None
+        if mode not in (MODE_COOL, MODE_HEAT):
+            return None  # fan_only is the park state; auto/dry are healed
+        change: dict[str, Any] = {}
+        if not zone.enable:
+            change["enable"] = True
+        if zone.target is not None:
+            low, high = setpoints(
+                mode=mode,
+                target=float(zone.target),
+                eco=False,
+                clamp_min=self.clamp_min,
+                clamp_max=self.clamp_max,
+                band=self.setpoint_band,
+                step=self.target_step,
+                eco_cool=self.eco_cool,
+                eco_heat=self.eco_heat,
+            )
+            low, high = self._clamp_to_head_band(climate_id, low, high)
+            expected = high if mode == MODE_COOL else low
+            attrs = state.attributes
+            if int(attrs.get("supported_features") or 0) & 2:  # dual setpoint
+                key = "target_temp_high" if mode == MODE_COOL else "target_temp_low"
+            else:
+                key = "temperature"
+            shown = _as_float(attrs.get(key))
+            if shown is not None and abs(shown - expected) >= self.target_step / 2:
+                step = self.target_step or 1.0
+                lo, hi = self.head_target_bounds(climate_id)
+                change["target"] = min(max(round(shown / step) * step, lo), hi)
+        return change or None
+
+    def _sibling_eid(self, platform: str, key: str) -> str | None:
+        return er.async_get(self.hass).async_get_entity_id(
+            platform, DOMAIN, f"{self.config_entry.entry_id}_{key}"
+        )
+
+    async def _async_adopt_head_change(self, climate_id: str) -> None:
+        """A head-side change held past the debounce: copy it to the room."""
+        try:
+            if (change := self._head_adoption(climate_id)) is not None:
+                zone = next(z for z in self.zones if z.climate_id == climate_id)
+                _LOGGER.info("MXZ: adopting head-side change on %s: %s", climate_id, change)
+                if "target" in change and (
+                    eid := self._sibling_eid("number", f"{zone.slug}_target")
+                ):
+                    await self.hass.services.async_call(
+                        "number",
+                        "set_value",
+                        {"entity_id": eid, "value": change["target"]},
+                        blocking=True,
+                    )
+                if "enable" in change and (
+                    eid := self._sibling_eid("switch", f"{zone.slug}_enable")
+                ):
+                    await self.hass.services.async_call(
+                        "switch",
+                        "turn_on" if change["enable"] else "turn_off",
+                        {"entity_id": eid},
+                        blocking=True,
+                    )
+        except HomeAssistantError as err:
+            _LOGGER.error("MXZ: adopting head change on %s failed: %s", climate_id, err)
+        finally:
+            if not self._retired:
+                await self.async_request_refresh()
 
     async def _heal_and_notify(self) -> None:
         await self.async_request_refresh()

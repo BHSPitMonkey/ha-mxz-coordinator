@@ -21,6 +21,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .capabilities import head_mode_problem, supported_idle_actions
 from .const import (
+    CONF_ACCEPT_HEAD_CHANGES,
     CONF_CHANGEOVER_COOL_BELOW,
     CONF_CHANGEOVER_ENTITY,
     CONF_CHANGEOVER_HEAT_ABOVE,
@@ -45,6 +46,7 @@ from .const import (
     CONF_RESTING_MODE_BIAS,
     CONF_SECONDARY_CLIMATE,
     CONF_ZONES,
+    DEFAULT_ACCEPT_HEAD_CHANGES,
     DEFAULT_CHANGEOVER_COOL_BELOW,
     DEFAULT_CHANGEOVER_HEAT_ABOVE,
     DEFAULT_CLAMP_MAX,
@@ -990,6 +992,12 @@ def _tunables_schema(
                 CONF_COIL_DRY_MINUTES,
                 default=eff.get(CONF_COIL_DRY_MINUTES, DEFAULT_COIL_DRY_MINUTES),
             ): _num(),
+            vol.Optional(
+                CONF_ACCEPT_HEAD_CHANGES,
+                default=eff.get(
+                    CONF_ACCEPT_HEAD_CHANGES, DEFAULT_ACCEPT_HEAD_CHANGES
+                ),
+            ): selector.BooleanSelector(),
             vol.Optional(
                 CONF_FAN_BOOST_ENABLE,
                 default=eff.get(
